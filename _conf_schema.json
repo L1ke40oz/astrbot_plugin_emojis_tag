@@ -1,0 +1,64 @@
+{
+  "emojis_path": {
+    "description": "表情包根目录",
+    "type": "string",
+    "hint": "支持绝对路径或相对路径（相对插件目录），留空使用插件目录下的 emojis/。该目录下的每个子文件夹名即一个情绪类别（如 happy、sad），子文件夹内放对应情绪的表情包图片。",
+    "default": ""
+  },
+  "inject": {
+    "description": "【提示词注入】",
+    "type": "object",
+    "hint": "控制如何向 LLM 注入「可发送表情包」的提示词。提示词里的占位符 {emotions} 会自动替换为表情包目录下扫描到的情绪文件夹名。",
+    "items": {
+      "enable": {
+        "description": "启用提示词注入",
+        "type": "bool",
+        "hint": "关闭后不再向 LLM 注入表情包提示词（也就不会有标签可解析）。",
+        "default": true
+      },
+      "mode": {
+        "description": "注入模式",
+        "type": "string",
+        "options": ["always", "probability"],
+        "hint": "always=每轮都注入提示词，由 LLM 自己决定要不要发表情包；probability=仅在 roll 命中概率时才注入提示词，未命中的那轮 LLM 看不到表情包能力、不会发表情包。",
+        "default": "always"
+      },
+      "probability": {
+        "description": "注入概率",
+        "type": "float",
+        "hint": "仅 probability 模式生效。每轮注入提示词的概率 (0.0 - 1.0)。",
+        "slider": {
+          "min": 0,
+          "max": 1,
+          "step": 0.05
+        },
+        "default": 0.3
+      },
+      "prompt_template": {
+        "description": "提示词模板",
+        "type": "text",
+        "hint": "注入到 system prompt 的说明文字。占位符 {emotions} 会被替换为可用情绪列表。标签形式固定为 <情绪名>，例如 <happy>。",
+        "default": "你可以在回复中插入情绪标签来给用户发送对应情绪的表情包。\n当前可用的情绪表情包有：{emotions}。\n当你想发某种情绪的表情包时，在回复文本中插入 <情绪名> 形式的标签即可，例如想发开心的表情包就写 <happy>。\n规则：\n1. 只能使用上面列出的情绪名，不要编造列表之外的情绪。\n2. 标签可以放在回复的任意位置，表情包会出现在标签所在的位置；不想发表情包时不要写任何标签。\n3. 标签本身不会展示给用户，用户只会看到对应的表情包图片，因此不要额外解释这个标签。"
+      }
+    }
+  },
+  "history": {
+    "description": "【对话历史中的标签处理】",
+    "type": "object",
+    "hint": "控制情绪标签如何写入对话历史/对话数据。无论如何设置，发送给用户的消息都会过滤掉原始标签，对话数据中也不会出现 <情绪名> 原始标签。",
+    "items": {
+      "record": {
+        "description": "把标签转写为文字记入历史",
+        "type": "bool",
+        "hint": "开启：把标签替换成一段文字（见下方模板）写入对话历史，让 AI 记得自己发过哪张表情包；关闭：直接从历史中剥离标签，不留任何痕迹。",
+        "default": true
+      },
+      "template": {
+        "description": "历史摘要模板",
+        "type": "string",
+        "hint": "record 开启时，每个标签会被替换成这段文字写入历史。占位符：{emotion}=情绪名，{filename}=实际发送的图片文件名（含扩展名）。例如默认会写成「[发送了表情包：happy-xxx.jpg]」。",
+        "default": "[发送了表情包：{emotion}-{filename}]"
+      }
+    }
+  }
+}
