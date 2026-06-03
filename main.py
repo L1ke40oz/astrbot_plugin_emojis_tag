@@ -356,12 +356,18 @@ class EmojisTagPlugin(Star):
         event.set_extra(self._EXTRA_PICKS, picks)
         event.set_extra(self._EXTRA_SUMMARIES, summaries)
 
-        # 改写写入对话历史的文本：剥离标签后，把摘要追加到正文末尾（或仅剥离）。
-        history_text = self._build_history_text(text, summaries)
+        # completion_text 决定「发送给用户」的内容，因此只放剥离情绪标签后的干净
+        # 正文，绝不能塞进摘要——否则当模型只发表情包（正文为空、仅含别的插件的
+        # 标签如 [NEXT]）时，摘要会被当成正文发出去（与 proactive_message 冲突）。
+        clean_body = self._strip_all_tags(text)
         try:
-            response.completion_text = history_text
+            response.completion_text = clean_body
         except Exception:
             pass
+
+        # 摘要只写入持久化的对话历史（run_context），让模型记得自己发过表情包，
+        # 不影响实际发送的消息。
+        history_text = self._build_history_text(text, summaries)
         self._patch_last_assistant_message(event, history_text)
 
         logger.info(
@@ -421,21 +427,26 @@ class EmojisTagPlugin(Star):
             return
 
         result = event.get_result()
-        if result is None or not getattr(result, "chain", None):
+        if result is None:
             return
+        chain = list(getattr(result, "chain", None) or [])
 
         # 复用 on_llm_response 阶段挑好的图片，保证与历史记录一致；
         # 若没有（例如该结果未经过 on_llm_response），则在此基于 chain 文本现挑。
         picks = event.get_extra(self._EXTRA_PICKS)
         if not picks:
-            chain_text = self._extract_text_from_chain(result.chain)
+            chain_text = self._extract_text_from_chain(chain)
             if not chain_text or not self._open_tag_re.search(chain_text):
                 # 没有本插件的标签，无需处理。
                 return
             picks = self._pick_for_text(chain_text)
+        if not picks:
+            return
 
+        # 注意：completion_text 已被 on_llm_response 剥离情绪标签，chain 里通常已无
+        # 标签；图片靠 picks 插入，即使正文为空也要把表情包发出去。
         images = [Image(file=self._maybe_resize(p["path"])) for p in picks]
-        new_chain = self._build_chain(result.chain, images)
+        new_chain = self._build_chain(chain, images)
         if new_chain is not None:
             result.chain = new_chain
         for p in picks:
@@ -457,28 +468,28 @@ class EmojisTagPlugin(Star):
         return "".join(parts)
 
     def _build_chain(self, chain: list, images: list) -> list | None:
-        """重建消息链：剥离全部情绪标签，再把表情包图片随机穿插进文本片段之间。"""
+        """重建消息链：剥离残留情绪标签，再把表情包图片随机穿插进文本片段之间。
+
+        - 有图片要插入时：始终把正文切成句子片段并随机穿插图片（即便 chain 里
+          已无标签——标签通常已在 on_llm_response 阶段从 completion_text 剥离）。
+        - 没有图片时：仅当确实剥离了残留标签才返回新链，否则返回 None 不改动。
+        """
         if self._open_tag_re is None:
             return None
 
-        segments = self._segmentize(chain)
-        if segments is None and not images:
-            # 既无标签可剥离也无图片可插入。
-            return None
-
-        base = segments if segments is not None else list(chain)
+        segments, changed = self._segmentize(chain)
         if not images:
-            return base
-        return self._interleave(base, images)
+            return segments if changed else None
+        return self._interleave(segments, images)
 
-    def _segmentize(self, chain: list) -> list | None:
-        """剥离情绪标签并把纯文本切成句子片段，便于随机穿插。
+    def _segmentize(self, chain: list) -> tuple[list, bool]:
+        """剥离残留情绪标签并把纯文本切成句子片段，便于随机穿插。
 
-        返回 None 表示消息链里没有任何情绪标签（无需改动）。非 Plain 组件
-        （如 TTS 的 Record）以及含有其它 ``<...>`` 标签的文本片段保持原子，
-        避免破坏别的插件的标签。
+        返回 ``(segments, changed)``；``changed`` 表示是否剥离掉了情绪标签。
+        非 Plain 组件（如 TTS 的 Record）以及含有其它 ``<...>`` 标签的文本片段
+        保持原子，避免破坏别的插件的标签。
         """
-        has_tag = False
+        changed = False
         segments: list = []
         for comp in chain:
             text = getattr(comp, "text", None)
@@ -486,10 +497,10 @@ class EmojisTagPlugin(Star):
                 segments.append(comp)
                 continue
 
-            if self._open_tag_re.search(text) or (
+            if (self._open_tag_re is not None and self._open_tag_re.search(text)) or (
                 self._close_tag_re is not None and self._close_tag_re.search(text)
             ):
-                has_tag = True
+                changed = True
             cleaned = self._strip_all_tags(text)
             if not cleaned:
                 continue
@@ -501,7 +512,7 @@ class EmojisTagPlugin(Star):
                 if piece.strip():
                     segments.append(Plain(piece))
 
-        return segments if has_tag else None
+        return segments, changed
 
     def _interleave(self, segments: list, images: list) -> list:
         """把每张表情包图片随机插入到 segments 的片段边界之间。"""
