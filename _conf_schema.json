@@ -20,7 +20,7 @@
         "description": "注入模式",
         "type": "string",
         "options": ["always", "probability"],
-        "hint": "always=每轮都注入提示词，由 LLM 自己决定要不要发表情包；probability=仅在 roll 命中概率时才注入提示词，未命中的那轮 LLM 看不到表情包能力、不会发表情包。",
+        "hint": "always=每轮都注入提示词，由 LLM 自己决定要不要发表情包；probability=仅在 roll 命中概率时才注入提示词，未命中的那轮 LLM 看不到表情包能力、不会发表情包。概率注入模式下，提示词应删去可选插入标签。",
         "default": "always"
       },
       "probability": {
