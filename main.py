@@ -55,7 +55,13 @@ class EmojisTagPlugin(Star):
 
     # event extra 键名
     _EXTRA_PICKS = "_emojis_tag_picks"
-    _EXTRA_ORIGINAL = "_emojis_tag_original_text"
+    _EXTRA_SUMMARIES = "_emojis_tag_summaries"
+    # active_function 插件在 on_llm_response 里缓存的原始文本快照，其引用回复/
+    # 戳一戳/撤回的「接管发送」会以此为文本来源；需在装饰阶段清掉本插件的标签。
+    _ACTIVE_FUNC_EXTRA = "_active_func_original_text"
+
+    # 句末标点，用于把文本切分成可随机穿插表情包的片段。
+    _SENTENCE_SPLIT_RE = re.compile(r"(?<=[。！？!?~…\n])")
 
     def __init__(self, context: Context, config: dict[str, Any] | None = None):
         super().__init__(context)
@@ -128,7 +134,7 @@ class EmojisTagPlugin(Star):
             "例如想发开心的表情包就写 <happy>。\n"
             "规则：\n"
             "1. 只能使用上面列出的情绪名，不要编造列表之外的情绪。\n"
-            "2. 标签可以放在回复的任意位置，表情包会出现在标签所在的位置；"
+            "2. 想发某种情绪的表情包时，在回复里写一个对应标签即可；"
             "不想发表情包时不要写任何标签。\n"
             "3. 标签本身不会展示给用户，用户只会看到对应的表情包图片，"
             "因此不要额外解释这个标签。"
@@ -253,34 +259,42 @@ class EmojisTagPlugin(Star):
             )
         return picks
 
-    def _build_history_text(self, text: str, picks: list[dict[str, str]]) -> str:
-        """把 text 中的情绪标签替换为历史摘要文字（或直接剥离）。"""
-        if self._open_tag_re is None:
-            return text
-
-        index = 0
-
-        def _repl(match: re.Match[str]) -> str:
-            nonlocal index
-            emotion = self._resolve_emotion(match.group(1))
-            if emotion is None:
-                return match.group(0)
-            pick = picks[index] if index < len(picks) else None
-            index += 1
-            if not self.history_record or pick is None:
-                return ""
+    def _summaries_for(self, picks: list[dict[str, str]]) -> list[str]:
+        """为每个选中的表情包生成历史摘要文字。"""
+        summaries: list[str] = []
+        for pick in picks:
             try:
-                return self.history_template.format(
-                    emotion=pick["emotion"], filename=pick["filename"]
+                summaries.append(
+                    self.history_template.format(
+                        emotion=pick["emotion"], filename=pick["filename"]
+                    )
                 )
             except (KeyError, IndexError, ValueError):
-                return self.history_template
+                summaries.append(self.history_template)
+        return summaries
 
-        result = self._open_tag_re.sub(_repl, text)
-        # 去掉可能残留的闭合标签（如 </happy>）。
+    def _build_history_text(
+        self, text: str, summaries: list[str]
+    ) -> str:
+        """构造写入对话历史的文本：先剥离所有情绪标签，再把摘要追加到正文末尾。
+
+        与原位替换不同，摘要统一放在 bot 正文之后并换行，例如：
+
+            好呀，今天天气不错\n[发送了表情包：happy-xxx.jpg]
+        """
+        body = self._strip_all_tags(text)
+        if not self.history_record or not summaries:
+            return body
+        tail = "\n".join(summaries)
+        return f"{body}\n{tail}" if body else tail
+
+    def _strip_all_tags(self, text: str) -> str:
+        """剥离文本中所有已知情绪的开/闭标签，并归一空白。"""
+        if self._open_tag_re is not None:
+            text = self._open_tag_re.sub("", text)
         if self._close_tag_re is not None:
-            result = self._close_tag_re.sub("", result)
-        return re.sub(r"[ \t]{2,}", " ", result).strip()
+            text = self._close_tag_re.sub("", text)
+        return re.sub(r"[ \t]{2,}", " ", text).strip()
 
     # ----------------------------------------------------- LLM 请求：注入提示词
 
@@ -328,11 +342,12 @@ class EmojisTagPlugin(Star):
         # 为每个标签随机选图，缓存到 event，供发送阶段复用，保证历史里记录
         # 的文件名与实际发送的图片一致。
         picks = self._pick_for_text(text)
-        event.set_extra(self._EXTRA_ORIGINAL, text)
+        summaries = self._summaries_for(picks)
         event.set_extra(self._EXTRA_PICKS, picks)
+        event.set_extra(self._EXTRA_SUMMARIES, summaries)
 
-        # 改写写入对话历史的文本：标签 -> 摘要文字（或剥离）。
-        history_text = self._build_history_text(text, picks)
+        # 改写写入对话历史的文本：剥离标签后，把摘要追加到正文末尾（或仅剥离）。
+        history_text = self._build_history_text(text, summaries)
         try:
             response.completion_text = history_text
         except Exception:
@@ -383,9 +398,12 @@ class EmojisTagPlugin(Star):
         except Exception as e:
             logger.debug(f"[emojis_tag] 改写 assistant 历史消息失败: {e}")
 
-    # ----------------------------------- 发送阶段：过滤标签 + 插入表情包图片
+    # ----------------------------------- 发送阶段：过滤标签 + 随机穿插表情包
 
-    @filter.on_decorating_result(priority=5)
+    # 优先级高于 active_function 的 poke(12)/reply(11)/recall(10) 及 TTS(13)，
+    # 这样在它们「接管发送」之前，表情包图片已作为非文本组件存在于消息链中，
+    # 会被它们的接管逻辑一并保留并发送，避免引用回复时表情包丢失。
+    @filter.on_decorating_result(priority=20)
     async def decorate_result(self, event: AstrMessageEvent):
         if not self.emoji_map or self._open_tag_re is None:
             return
@@ -402,12 +420,22 @@ class EmojisTagPlugin(Star):
         if not picks:
             chain_text = self._extract_text_from_chain(result.chain)
             if not chain_text or not self._open_tag_re.search(chain_text):
+                # 没有本插件的标签，无需处理。
                 return
             picks = self._pick_for_text(chain_text)
 
-        new_chain = self._build_chain(result.chain, picks)
+        images = [Image(file=p["path"]) for p in picks]
+        new_chain = self._build_chain(result.chain, images)
         if new_chain is not None:
             result.chain = new_chain
+        for p in picks:
+            logger.info(
+                f"[emojis_tag] 发送表情包: {p['emotion']}/{p['filename']}"
+            )
+
+        # 清理 active_function 缓存的文本快照，避免其引用回复/戳一戳/撤回的
+        # 接管发送把本插件的标签或摘要当作文本发给用户。
+        self._sanitize_active_function_extra(event)
 
     @staticmethod
     def _extract_text_from_chain(chain: list) -> str:
@@ -418,69 +446,85 @@ class EmojisTagPlugin(Star):
                 parts.append(txt)
         return "".join(parts)
 
-    def _build_chain(self, chain: list, picks: list[dict[str, str]]) -> list | None:
-        """重建消息链：剥离情绪标签，并在标签位置插入对应表情包图片。
-
-        ``picks`` 是按标签出现顺序排好的选图结果，逐个消费。
-        """
+    def _build_chain(self, chain: list, images: list) -> list | None:
+        """重建消息链：剥离全部情绪标签，再把表情包图片随机穿插进文本片段之间。"""
         if self._open_tag_re is None:
             return None
 
-        index = 0
-        new_chain: list = []
-        changed = False
+        segments = self._segmentize(chain)
+        if segments is None and not images:
+            # 既无标签可剥离也无图片可插入。
+            return None
 
+        base = segments if segments is not None else list(chain)
+        if not images:
+            return base
+        return self._interleave(base, images)
+
+    def _segmentize(self, chain: list) -> list | None:
+        """剥离情绪标签并把纯文本切成句子片段，便于随机穿插。
+
+        返回 None 表示消息链里没有任何情绪标签（无需改动）。非 Plain 组件
+        （如 TTS 的 Record）以及含有其它 ``<...>`` 标签的文本片段保持原子，
+        避免破坏别的插件的标签。
+        """
+        has_tag = False
+        segments: list = []
         for comp in chain:
             text = getattr(comp, "text", None)
             if not isinstance(comp, Plain) or not isinstance(text, str) or not text:
-                new_chain.append(comp)
+                segments.append(comp)
                 continue
 
-            if not self._open_tag_re.search(text):
-                # 仍可能含残留闭合标签，顺手清掉。
-                cleaned = self._strip_close_tags(text)
-                if cleaned != text:
-                    changed = True
-                    if cleaned:
-                        new_chain.append(Plain(cleaned))
-                else:
-                    new_chain.append(comp)
+            if self._open_tag_re.search(text) or (
+                self._close_tag_re is not None and self._close_tag_re.search(text)
+            ):
+                has_tag = True
+            cleaned = self._strip_all_tags(text)
+            if not cleaned:
                 continue
+            # 含其它尖括号标签（如 <tts>）的文本不切分，避免破坏配对。
+            if "<" in cleaned or ">" in cleaned:
+                segments.append(Plain(cleaned))
+                continue
+            for piece in self._SENTENCE_SPLIT_RE.split(cleaned):
+                if piece.strip():
+                    segments.append(Plain(piece))
 
-            changed = True
-            last_end = 0
-            for match in self._open_tag_re.finditer(text):
-                segment = text[last_end : match.start()]
-                segment = self._strip_close_tags(segment)
-                if segment:
-                    new_chain.append(Plain(segment))
+        return segments if has_tag else None
 
-                emotion = self._resolve_emotion(match.group(1))
-                last_end = match.end()
-                if emotion is None:
-                    continue
-                pick = picks[index] if index < len(picks) else None
-                index += 1
-                if pick is None:
-                    # 没有可用图片：标签已被剥离，不插入任何内容。
-                    continue
-                new_chain.append(Image(file=pick["path"]))
-                logger.info(
-                    f"[emojis_tag] 发送表情包: {pick['emotion']}/{pick['filename']}"
-                )
-
-            tail = self._strip_close_tags(text[last_end:])
-            if tail:
-                new_chain.append(Plain(tail))
-
-        if not changed:
-            return None
+    def _interleave(self, segments: list, images: list) -> list:
+        """把每张表情包图片随机插入到 segments 的片段边界之间。"""
+        if not segments:
+            return list(images)
+        slots = len(segments) + 1
+        positions = sorted(random.randrange(slots) for _ in images)
+        new_chain: list = []
+        img_idx = 0
+        for i in range(slots):
+            while img_idx < len(images) and positions[img_idx] == i:
+                new_chain.append(images[img_idx])
+                img_idx += 1
+            if i < len(segments):
+                new_chain.append(segments[i])
         return new_chain
 
-    def _strip_close_tags(self, text: str) -> str:
-        if self._close_tag_re is None:
-            return text
-        return self._close_tag_re.sub("", text)
+    def _sanitize_active_function_extra(self, event: AstrMessageEvent) -> None:
+        """从 active_function 的文本快照里移除本插件的标签与摘要文字。
+
+        active_function 的引用回复/戳一戳/撤回在「接管发送」时以该快照为文本
+        来源，若不清理，本插件的 <情绪> 标签或摘要会被当成正文发给用户。
+        """
+        orig = event.get_extra(self._ACTIVE_FUNC_EXTRA)
+        if not isinstance(orig, str) or not orig:
+            return
+        cleaned = self._strip_all_tags(orig)
+        for summary in event.get_extra(self._EXTRA_SUMMARIES) or []:
+            if summary:
+                cleaned = cleaned.replace(summary, "")
+        cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
+        if cleaned != orig:
+            event.set_extra(self._ACTIVE_FUNC_EXTRA, cleaned)
 
     # --------------------------------------------------------------- 指令
 
