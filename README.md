@@ -118,25 +118,8 @@ png/jpg 原图分辨率可能很大，导致聊天里图片显示得很大。开
 > 文本之后发送，此时表情包不再穿插在句子中间，而是出现在整段文字之后。普通回复
 > （无引用/戳一戳/撤回）下仍是随机穿插。
 
-### 与 proactive_message 共存
-
-[proactive_message](https://github.com/L1ke40oz/astrbot_plugin_proactive_message)
-会输出 `[NEXT: Xm]` 标签，并在「正文仅含标签、删后为空」时不发送文字消息。
-
-因为本插件的摘要**只写入对话历史、不进 `completion_text`**，所以当模型只发表情包、
-不说话（例如只返回 `<happy>[NEXT: 30m]`）时：
-
-- 发送内容里没有摘要文字，proactive_message 删掉 `[NEXT]` 后正文为空、不发文字；
-- 表情包图片仍作为非文本组件保留在消息链中，照常发送；
-- 摘要 `[发送了表情包：happy-xxx.jpg]` 仅记入对话历史，供模型记忆。
 
 ## 已知限制
 
 - 标签的过滤与图片插入发生在 `on_decorating_result` 阶段；在**流式输出**模式下该钩子可能不触发，标签可能短暂泄漏，建议配合非流式输出使用。
 - 插件只处理与已扫描情绪同名的标签，不会干扰其它插件的标签（如 `[poke]`、`<tts>`）；含 `<tts>` 等尖括号标签的文本片段不会被切分，以免破坏配对。
-
-## 参考
-
-- [astrbot_plugin_sendemojis](https://github.com/L1ke40oz/astrbot_plugin_sendemojis)：按概率由模型判断情绪后发送表情包。
-- [astrbot_plugin_active_function](https://github.com/L1ke40oz/astrbot_plugin_active_function)：标签过滤并转写进对话历史的实现参考。
-- [AstrBot 插件开发文档](https://docs.astrbot.app/dev/star/plugin-new.html)

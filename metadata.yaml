@@ -1,6 +1,6 @@
 name: astrbot_plugin_emojis_tag
 display_name: 表情包标签
-desc: 通过提示词注入 + 情绪标签让 LLM 自主发送表情包，并将标签过滤、转写进对话历史。
+desc: 通过提示词注入与情绪标签让 LLM 自主发送表情包，并将标签过滤、转写进对话历史。
 version: v1.0.0
 author: L1ke40oz
 repo: https://github.com/L1ke40oz/astrbot_plugin_emojis_tag
