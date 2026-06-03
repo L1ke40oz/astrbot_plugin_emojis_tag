@@ -67,6 +67,8 @@ class EmojisTagPlugin(Star):
         super().__init__(context)
         self.config: dict[str, Any] = config or {}
         self.plugin_dir = os.path.dirname(os.path.abspath(__file__))
+        # 压缩后图片的缓存目录（按 原图mtime+尺寸+质量 命名，命中即复用）
+        self._resize_cache_dir = os.path.join(self.plugin_dir, ".resized_cache")
 
         # 情绪 -> 该情绪文件夹下的图片绝对路径列表
         self.emoji_map: dict[str, list[str]] = {}
@@ -124,6 +126,14 @@ class EmojisTagPlugin(Star):
         self.history_template: str = str(
             history_cfg.get("template", "") or ""
         ).strip() or "[发送了表情包：{emotion}-{filename}]"
+
+        image_cfg = cfg.get("image", {}) or {}
+        # 发送前把图片最长边等比压缩到 max_side，避免原图分辨率过大。
+        self.image_resize: bool = bool(image_cfg.get("resize", True))
+        self.image_max_side: int = max(1, int(image_cfg.get("max_side", 512) or 512))
+        self.image_quality: int = max(
+            1, min(100, int(image_cfg.get("quality", 85) or 85))
+        )
 
     @staticmethod
     def _default_prompt_template() -> str:
@@ -424,7 +434,7 @@ class EmojisTagPlugin(Star):
                 return
             picks = self._pick_for_text(chain_text)
 
-        images = [Image(file=p["path"]) for p in picks]
+        images = [Image(file=self._maybe_resize(p["path"])) for p in picks]
         new_chain = self._build_chain(result.chain, images)
         if new_chain is not None:
             result.chain = new_chain
@@ -525,6 +535,66 @@ class EmojisTagPlugin(Star):
         cleaned = re.sub(r"[ \t]{2,}", " ", cleaned).strip()
         if cleaned != orig:
             event.set_extra(self._ACTIVE_FUNC_EXTRA, cleaned)
+
+    # ------------------------------------------------- 发送前图片压缩
+    # 仅压缩静态格式；gif/webp 可能是动图，缩放会破坏动画，故跳过。
+    _RESIZABLE_EXTENSIONS: tuple[str, ...] = (".jpg", ".jpeg", ".png", ".bmp")
+
+    def _maybe_resize(self, path: str) -> str:
+        """把图片最长边等比压缩到 ``image_max_side``，返回可发送的路径。
+
+        失败、未启用、无需缩放或缺少 Pillow 时，原样返回 ``path``。
+        """
+        if not self.image_resize:
+            return path
+        ext = os.path.splitext(path)[1].lower()
+        if ext not in self._RESIZABLE_EXTENSIONS:
+            return path
+        try:
+            from PIL import Image as PILImage
+        except Exception:
+            logger.warning(
+                "[emojis_tag] 未安装 Pillow，跳过图片压缩；如需压缩请 pip install pillow"
+            )
+            return path
+
+        try:
+            mtime = int(os.path.getmtime(path))
+            stem = os.path.splitext(os.path.basename(path))[0]
+            cache_name = f"{stem}_{self.image_max_side}_{self.image_quality}_{mtime}{ext}"
+            cache_path = os.path.join(self._resize_cache_dir, cache_name)
+            if os.path.isfile(cache_path):
+                return cache_path
+
+            with PILImage.open(path) as im:
+                width, height = im.size
+                longest = max(width, height)
+                if longest <= self.image_max_side:
+                    return path  # 本就不大，无需压缩
+
+                scale = self.image_max_side / float(longest)
+                new_size = (
+                    max(1, int(round(width * scale))),
+                    max(1, int(round(height * scale))),
+                )
+                resized = im.resize(new_size, PILImage.LANCZOS)
+
+                os.makedirs(self._resize_cache_dir, exist_ok=True)
+                save_kwargs: dict[str, Any] = {}
+                if ext in (".jpg", ".jpeg"):
+                    resized = resized.convert("RGB")
+                    save_kwargs = {"quality": self.image_quality, "optimize": True}
+                elif ext == ".png":
+                    save_kwargs = {"optimize": True}
+                resized.save(cache_path, **save_kwargs)
+            logger.debug(
+                f"[emojis_tag] 压缩图片 {os.path.basename(path)}: "
+                f"{width}x{height} -> {new_size[0]}x{new_size[1]}"
+            )
+            return cache_path
+        except Exception as e:
+            logger.warning(f"[emojis_tag] 图片压缩失败，发送原图: {path} ({e})")
+            return path
 
     # --------------------------------------------------------------- 指令
 
