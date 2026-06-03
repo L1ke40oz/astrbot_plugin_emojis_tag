@@ -60,5 +60,35 @@
         "default": "[发送了表情包：{emotion}-{filename}]"
       }
     }
+  },
+  "image": {
+    "description": "【发送图片压缩】",
+    "type": "object",
+    "hint": "发送表情包前把分辨率过大的图片等比压缩，避免聊天里图片显示得太大。需要 Pillow（pip install pillow），未安装时自动跳过压缩、发送原图。仅压缩静态图（jpg/jpeg/png/bmp），gif/webp 因可能是动图而跳过。压缩结果会缓存复用，只影响发送的图片，不改动原文件，也不影响历史摘要里记录的文件名。",
+    "items": {
+      "resize": {
+        "description": "启用图片压缩",
+        "type": "bool",
+        "hint": "开启后，发送的图片若最长边超过下方上限，会被等比缩小到该上限。",
+        "default": true
+      },
+      "max_side": {
+        "description": "最长边像素上限",
+        "type": "int",
+        "hint": "图片宽/高中较长的一边的最大像素值，超过则等比缩小到该值；不超过则原样发送。",
+        "default": 512
+      },
+      "quality": {
+        "description": "JPEG 压缩质量",
+        "type": "int",
+        "hint": "仅对 jpg/jpeg 生效，1-100，越大越清晰但文件越大。png/bmp 不受此项影响。",
+        "slider": {
+          "min": 1,
+          "max": 100,
+          "step": 1
+        },
+        "default": 85
+      }
+    }
   }
 }
